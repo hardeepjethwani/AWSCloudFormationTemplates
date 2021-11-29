@@ -1,0 +1,381 @@
+AWSTemplateFormatVersion: 2021-11-29
+Description: This is database template for PSRA Application
+
+Parameters:  
+  ApplicationName:
+    Description: Name of the application
+    Type: String
+  
+  EnvironmentName:
+    Type: String
+  
+  BackupBucketname:
+    Description: Enter the name of the bucket in which you want to store the db backup
+    Type: String
+
+  DBInstanceClass:
+    Description: Database Instance Class; e.g db.m5.xlarge for general purpose
+    Type: String
+    
+  DatabaseName:
+    Description: Name of the database
+    Type: String
+
+  Engine:
+    Description: Database engine (Aurora not possible)
+    Type: String
+    AllowedValues:
+    - mariadb
+    - mysql
+    - oracle-ee
+    - oracle-se2
+    - oracle-se1
+    - oracle-se
+    - postgres
+    - sqlserver-ee
+    - sqlserver-se
+    - sqlserver-ex
+    - sqlserver-web
+
+  EngineVersion:
+    Description: Database engine version
+    Type: String
+
+  BackupRetentionPeriod:
+    Description: For how long should the backups be presumed (days)?
+    Type: Number
+
+  CidrIp:
+    Description: IP to allow incoming traffic on DataBase Port
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+
+  DatabaseMasterUsername:
+    Description: Database Master Username for RDS
+    Type: String
+
+  DatabasePort:
+    Description: Database port. If the default -1 is unchanged, a default db port
+      for the specified db type will be used
+    Type: Number
+
+  DBAllocatedStorage:
+    Description: The size of the database (GiB)
+    Type: Number
+    MinValue: '20'
+    MaxValue: '65536'
+    ConstraintDescription: must be between 20 and 65536 GiB.
+
+  DeleteProtect:
+    Description: Deletion protection of database
+    Type: String
+    AllowedValues:
+    - true
+    - false
+
+  EnableEnhancedMonitoring:
+    Description: Provide metrics in real time for the operating system (OS) that your
+      DB instance runs on.
+    Type: String
+    AllowedValues:
+    - true
+    - false
+
+  EnableDBMultiAZ:
+    Description: If enabled Non-Aurora DBs are created with a MultiAZ option.
+    Type: String
+    AllowedValues:
+    - true
+    - false
+
+  MaxAutoscalingStorageLimit:
+    Description: The Max size of the database (GiB) for Autoscaling
+    Type: Number
+
+  Vpc:
+    Description: Shared And Connected VPC id to place all the resources
+    Type: AWS::EC2::VPC::Id
+
+  SubnetA:
+    Description: Name of the subnet A
+    Type: AWS::EC2::Subnet::Id
+
+  SubnetB:
+    Description: Name of the subnet B
+    Type: AWS::EC2::Subnet::Id
+
+Conditions:
+
+  HasEnhancedMonitoring:
+    Fn::Equals:
+    - Ref: EnableEnhancedMonitoring
+    - 'true'
+
+  PortIsMinusOne:
+    Fn::Equals:
+    - Ref: DatabasePort
+    - '-1'
+
+Resources:
+  s3DbBackupBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Ref: BackupBucketname
+      AccessControl: Private
+
+  EnhancedMonitoringRole:
+    Condition: HasEnhancedMonitoring
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2021-11-29'
+        Statement:
+        - Sid: ''
+          Effect: Allow
+          Principal:
+            Service: monitoring.rds.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+      Path: /
+
+  OptionGrpRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2021-11-29
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: rds.amazonaws.com
+          Action: sts:AssumeRole
+      Path: /service-role/
+      Policies:
+      - PolicyName: OracleBackupRds
+        PolicyDocument:
+          Version: 2021-11-29
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:ListBucket
+            - s3:GetBucketLocation
+            Resource:
+            - Fn::Sub: arn:aws:s3:::${s3DbBackupBucket}
+          - Effect: Allow
+            Action:
+            - s3:GetObjectMetaData
+            - s3:GetObject
+            - s3:PutObject
+            - s3:ListMultipartUploadParts
+            - s3:AbortMultipartUpload
+            Resource:
+            - Fn::Sub: arn:aws:s3:::${s3DbBackupBucket}/*
+
+  BackupOptionGroup:
+    Type: AWS::RDS::OptionGroup
+    DeletionPolicy: "Retain"
+    Properties:
+      EngineName:
+        Ref: Engine
+      MajorEngineVersion:
+        Ref: EngineVersion
+      OptionGroupDescription: adding mutiple options
+      OptionConfigurations:
+      - OptionName: S3_INTEGRATION
+      - OptionName: JVM
+      - OptionName: UTL_MAIL
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${ApplicationName}${EnvironmentName}-OracleRDS-db
+
+  ParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    DeletionPolicy: "Retain"
+    Properties: 
+      Description: oracle se2 Db parameter group
+      Family: oracle-se2-19
+      Parameters:
+        aq_tm_processes : 0
+        audit_sys_operations : FALSE
+        audit_trail : NONE
+        control_file_record_keep_time : 35
+        db_block_checking : TRUE
+        job_queue_processes : 30
+        max_dump_file_size : 50M
+        open_cursors : 800
+        parallel_max_servers : 20
+        processes : 300
+        resource_limit : FALSE       
+
+  DBSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Ref: DBSecurityGroup
+      IpProtocol: tcp
+      FromPort:
+        Fn::GetAtt:
+        - DBInstance
+        - Endpoint.Port
+      ToPort:
+        Fn::GetAtt:
+        - DBInstance
+        - Endpoint.Port
+      CidrIp:
+        Ref: CidrIp
+      Description: Allow access to the database on db ports
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Database security group
+      VpcId:
+        Ref: Vpc
+
+  DBMasterSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      GenerateSecretString:
+        SecretStringTemplate:
+          Fn::Join:
+          - ''
+          - - '{"username": "'
+            - Ref: DatabaseMasterUsername
+            - '"}'
+        GenerateStringKey: password
+        ExcludePunctuation: true
+        PasswordLength: 16
+
+  SecretClusterAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId:
+        Ref: DBMasterSecret
+      TargetId:
+        Ref: DBInstance
+      TargetType: AWS::RDS::DBInstance
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: DB subnet group
+      SubnetIds:
+      - Ref: SubnetA
+      - Ref: SubnetB
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AssociatedRoles:
+      - FeatureName: S3_INTEGRATION
+        RoleArn:
+          Fn::GetAtt:
+          - OptionGrpRole
+          - Arn
+      DBInstanceIdentifier:
+        Fn::Sub: ${ApplicationName}${EnvironmentName}-OracleRDS
+      DBName: 
+        Ref: DatabaseName
+      DBInstanceClass:
+        Ref: DBInstanceClass
+      DeletionProtection:
+        Ref: DeleteProtect
+      DeleteAutomatedBackups: false
+      AllocatedStorage:
+        Ref: DBAllocatedStorage
+      Engine:
+        Ref: Engine
+      EngineVersion:
+        Ref: EngineVersion
+      LicenseModel: license-included
+      Port:
+        Fn::If:
+        - PortIsMinusOne
+        - Ref: AWS::NoValue
+        - Ref: DatabasePort
+      MasterUsername:
+        Fn::Join:
+        - ''
+        - - '{{resolve:secretsmanager:'
+          - Ref: DBMasterSecret
+          - :SecretString:username}}
+      MasterUserPassword:
+        Fn::Join:
+        - ''
+        - - '{{resolve:secretsmanager:'
+          - Ref: DBMasterSecret
+          - :SecretString:password}}
+      DBSubnetGroupName:
+        Ref: DBSubnetGroup
+      PubliclyAccessible: false
+      PreferredBackupWindow: 22:30-23:30
+      PreferredMaintenanceWindow: sat:00:30-sat:03:30
+      StorageEncrypted: true
+      MaxAllocatedStorage:
+        Ref: MaxAutoscalingStorageLimit
+      EnablePerformanceInsights: true
+      BackupRetentionPeriod:
+        Ref: BackupRetentionPeriod
+      MonitoringInterval:
+        Fn::If:
+        - HasEnhancedMonitoring
+        - 60
+        - 0
+      OptionGroupName:
+        Ref: BackupOptionGroup
+        
+      DBParameterGroupName:
+        Ref: ParameterGroup 
+        
+      MonitoringRoleArn:
+        Fn::If:
+        - HasEnhancedMonitoring
+        - Fn::GetAtt:
+          - EnhancedMonitoringRole
+          - Arn
+        - Ref: AWS::NoValue
+      StorageType: gp2
+      VPCSecurityGroups:
+      - Fn::GetAtt:
+        - DBSecurityGroup
+        - GroupId
+      MultiAZ:
+        Ref: EnableDBMultiAZ
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: ${ApplicationName}${EnvironmentName}-OracleRDS
+
+Outputs:
+  DBSecretName:
+    Description: Secret name where DB username / password are stored
+    Value:
+      Ref: DBMasterSecret
+    Export:
+      Name:
+        Fn::Sub: ${ApplicationName}${EnvironmentName}-DBSecretName
+
+  DBEndpoint:
+    Description: database endpoint
+    Value:
+      Fn::GetAtt:
+      - DBInstance
+      - Endpoint.Address
+    Export:
+      Name:
+        Fn::Sub: ${ApplicationName}${EnvironmentName}-DBEndpoint
+        
+  DBPort:
+    Description: database listener port
+    Value:
+      Fn::GetAtt:
+      - DBInstance
+      - Endpoint.Port
+    Export:
+      Name:
+        Fn::Sub: ${ApplicationName}${EnvironmentName}-DBPort
